@@ -1,0 +1,10 @@
+sdkconfig
+sdkconfig.defaults
+sdkconfig.old
+.clangd
+ESP32_mesh_root_node/build/
+ESP32_mesh_node/build/
+ESP32_softap/build/
+ESP32_mesh_root_node/.vscode/
+ESP32_mesh_node/.vscode/
+ESP32_softap/.vscode/

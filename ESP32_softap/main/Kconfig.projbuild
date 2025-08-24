@@ -1,0 +1,123 @@
+menu "Example Configuration"
+
+    menu "SoftAP Configuration"
+        comment "SoftAP Configuration"
+
+        config ESP_WIFI_AP_SSID
+            string "WiFi AP SSID"
+            default "myssid"
+            help
+                SSID (network name) of the AP for the example to connect to.
+
+        config ESP_WIFI_AP_PASSWORD
+            string "WiFi AP Password"
+            default "mypassword"
+            help
+                WiFi password of the AP for the example to use.
+
+        config ESP_WIFI_AP_CHANNEL
+            int "WiFi AP Channel"
+            range 1 14
+            default 1
+            help
+                WiFi channel (network channel) of the AP for the example to use.
+
+        config ESP_MAX_STA_CONN_AP
+            int "Maximal STA connections"
+            default 4
+            help
+                Max number of the STA connects to AP.
+    endmenu
+
+    menu "STA Configuration"
+        comment "STA Configuration"
+
+        config ESP_WIFI_REMOTE_AP_SSID
+            string "WiFi Remote AP SSID"
+            default "otherapssid"
+            help
+                SSID (network name) for the example's sta to connect to.
+
+        config ESP_WIFI_REMOTE_AP_PASSWORD
+            string "WiFi Remote AP Password"
+            default "otherappassword"
+            help
+                WiFi password for the example to use.
+
+        config ESP_MAXIMUM_STA_RETRY
+            int "Maximum retry"
+            default 5
+            help
+                Set the maximum retry value to prevent the station from continuously
+                attempting to reconnect to the Access Point (AP) when the AP doesn't exist.
+
+        choice ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD
+            prompt "WiFi Scan auth mode threshold"
+            default ESP_WIFI_AUTH_WPA2_PSK
+            help
+                The weakest authmode to accept in the scan mode.
+                This value defaults to ESP_WIFI_AUTH_WPA2_PSK in case password is present
+                and ESP_WIFI_AUTH_OPEN is used. Please select ESP_WIFI_AUTH_WEP / ESP_WIFI_AUTH_WPA_PSK
+                in case AP is operating in WEP / WPA mode.
+
+            config ESP_WIFI_AUTH_OPEN
+                bool "OPEN"
+            config ESP_WIFI_AUTH_WEP
+                bool "WEP"
+            config ESP_WIFI_AUTH_WPA_PSK
+                bool "WPA PSK"
+            config ESP_WIFI_AUTH_WPA2_PSK
+                bool "WPA2 PSK"
+            config ESP_WIFI_AUTH_WPA_WPA2_PSK
+                bool "WPA/WPA2 PSK"
+            config ESP_WIFI_AUTH_WPA3_PSK
+                bool "WPA3 PSK"
+            config ESP_WIFI_AUTH_WPA2_WPA3_PSK
+                bool "WPA2/WPA3 PSK"
+            config ESP_WIFI_AUTH_WAPI_PSK
+                bool "WAPI PSK"
+        endchoice
+
+    endmenu
+
+    menu "TCP Configuration"
+
+        config EXAMPLE_PORT
+            int "Listening Port"
+            default 3333
+            help
+                TCP server port number to listen on.
+
+        config EXAMPLE_KEEPALIVE_IDLE
+            int "TCP Keepalive Idle Time"
+            default 5
+            help
+                Time (in seconds) the connection needs to remain idle before TCP starts sending keepalive probes.
+
+        config EXAMPLE_KEEPALIVE_INTERVAL
+            int "TCP Keepalive Interval"
+            default 5
+            help
+                Time interval (in seconds) between individual keepalive probes.
+
+        config EXAMPLE_KEEPALIVE_COUNT
+            int "TCP Keepalive Count"
+            default 3
+            help
+                Number of keepalive probes TCP sends before considering the connection dead.
+
+        config EXAMPLE_IPV4
+            bool "Enable IPv4"
+            default y
+            help
+                Enable IPv4 server.
+
+        config EXAMPLE_IPV6
+            bool "Enable IPv6"
+            default n
+            help
+                Enable IPv6 server.
+
+        endmenu
+
+endmenu
