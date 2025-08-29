@@ -365,5 +365,5 @@ void app_main(void)
              esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", esp_mesh_is_ps_enabled());
     
     // Registering Custom Event Handlers
-    xTaskCreate(root_toggle, "TOG", 3072, NULL, 2, NULL);
+    // xTaskCreate(root_toggle, "TOG", 3072, NULL, 2, NULL);
 }

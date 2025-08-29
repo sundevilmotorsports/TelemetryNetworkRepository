@@ -12,9 +12,7 @@
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
-#if IP_NAPT
 #include "lwip/lwip_napt.h"
-#endif
 #include "lwip/err.h"
 #include "lwip/sys.h"
 
@@ -57,6 +55,13 @@
 /*DHCP server option*/
 #define DHCPS_OFFER_DNS             0x02
 
+#define PORT CONFIG_SOFTAP_TCP_SERVER_PORT
+#define KEEPALIVE_IDLE              5
+#define KEEPALIVE_INTERVAL          5
+#define KEEPALIVE_COUNT             3
+
+
+static const char *MESH_TAG = "FROM MESH ROOT";
 static const char *TAG_AP = "WiFi SoftAP";
 static const char *TAG_STA = "WiFi Sta";
 
@@ -157,12 +162,86 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_start(esp_netif_ap));
 }
 
-#define PORT                        CONFIG_EXAMPLE_PORT
-#define KEEPALIVE_IDLE              CONFIG_EXAMPLE_KEEPALIVE_IDLE
-#define KEEPALIVE_INTERVAL          CONFIG_EXAMPLE_KEEPALIVE_INTERVAL
-#define KEEPALIVE_COUNT             CONFIG_EXAMPLE_KEEPALIVE_COUNT
+static void tcp_server_task(void *pvParameters)
+{
+    char rx_buffer[128];
+    char host_ip[] = "0.0.0.0"; // Listen on all available interfaces
+    int addr_family = AF_INET;
+    int ip_protocol = IPPROTO_IP;
+    struct sockaddr_in dest_addr;
 
-static const char *TAG = "example";
+    // Set up the destination address structure for IPv4
+    dest_addr.sin_addr.s_addr = inet_addr(host_ip);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(PORT);
+
+    // 1. Create the listening socket
+    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+    if (listen_sock < 0) {
+        ESP_LOGE(MESH_TAG, "Unable to create socket: errno %d", errno);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(MESH_TAG, "Listener socket created");
+
+    // 2. Bind the socket to the local address and port
+    int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err != 0) {
+        ESP_LOGE(MESH_TAG, "Socket unable to bind: errno %d", errno);
+        goto CLEAN_UP;
+    }
+    ESP_LOGI(MESH_TAG, "Socket bound, port %d", PORT);
+
+    // 3. Start listening for incoming connections
+    // The '1' is the backlog size - how many pending connections to queue.
+    err = listen(listen_sock, 1);
+    if (err != 0) {
+        ESP_LOGE(MESH_TAG, "Error occurred during listen: errno %d", errno);
+        goto CLEAN_UP;
+    }
+    ESP_LOGI(MESH_TAG, "Socket listening...");
+
+    // This is the main server loop
+    while (1) {
+        struct sockaddr_in source_addr; // Large enough for both IPv4
+        socklen_t addr_len = sizeof(source_addr);
+
+        // 4. Accept a new connection
+        // This call blocks until a client connects.
+        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+        if (sock < 0) {
+            ESP_LOGE(MESH_TAG, "Unable to accept connection: errno %d", errno);
+            break; // Exit the loop on error
+        }
+        ESP_LOGI(MESH_TAG, "Connection accepted!");
+
+        // This is the inner loop to receive data from the connected client
+        int len;
+        do {
+            // 5. Receive data
+            len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+            if (len < 0) {
+                ESP_LOGE(MESH_TAG, "recv failed: errno %d", errno);
+                break;
+            } else if (len == 0) {
+                ESP_LOGI(MESH_TAG, "Connection closed by client");
+            } else {
+                // Null-terminate the received data to treat it as a string
+                rx_buffer[len] = 0;
+                ESP_LOGI(MESH_TAG, "Received %d bytes: %s", len, rx_buffer);
+            }
+        } while (len > 0);
+
+        // 6. Shutdown and close the connection
+        shutdown(sock, 0);
+        close(sock);
+        ESP_LOGI(MESH_TAG, "Client socket closed");
+    }
+
+CLEAN_UP:
+    close(listen_sock);
+    vTaskDelete(NULL);
+}
 
 void app_main(void)
 {
@@ -208,6 +287,7 @@ void app_main(void)
 
     /* Start WiFi */
     ESP_ERROR_CHECK(esp_wifi_start() );
+    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 4, NULL);
 
     /*
      * Wait until either the connection is established (WIFI_CONNECTED_BIT) or
@@ -241,4 +321,5 @@ void app_main(void)
     if (esp_netif_napt_enable(esp_netif_ap) != ESP_OK) {
         ESP_LOGE(TAG_STA, "NAPT not enabled on the netif: %p", esp_netif_ap);
     }
+
 }

@@ -27,6 +27,14 @@ menu "Example Configuration"
             default 4
             help
                 Max number of the STA connects to AP.
+
+        config SOFTAP_TCP_SERVER_PORT
+            int "TCP Server Port"
+            range 0 4500
+            default 3333
+            help
+                Port that the TCP Server socket will monitor
+
     endmenu
 
     menu "STA Configuration"

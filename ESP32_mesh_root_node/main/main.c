@@ -8,6 +8,7 @@
 #include "esp_mesh_internal.h"
 #include "nvs_flash.h"
 #include "lwip/sockets.h"
+#include "freertos/queue.h"
 
 /*******************************************************
  *                Macros
@@ -34,6 +35,13 @@ static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
 
+typedef struct {
+    uint8_t data[128];
+    size_t len;
+} message_to_send_t;
+
+static QueueHandle_t tcp_tx_queue;
+
 /*******************************************************
  *                Function Declarations
  *******************************************************/
@@ -48,39 +56,56 @@ void root_toggle(void *pvParameters);
  *                Function Definitions
  *******************************************************/
 
- void send_data_to_softap(const uint8_t *data, int len) {
-    struct sockaddr_in dest_addr;
-    dest_addr.sin_addr.s_addr = inet_addr(CONFIG_SOFTAP_SERVER_IP);
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(CONFIG_SOFTAP_SERVER_PORT);
+ static void tcp_client_task(void *pvParameters) {
+    const char *server_ip = CONFIG_SOFTAP_SERVER_IP;
+    const int server_port = CONFIG_SOFTAP_SERVER_PORT;
+    int sock = -1;
 
-    // Create the socket
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (sock < 0) {
-        ESP_LOGE(MESH_TAG, "Unable to create socket: errno %d", errno);
-        return;
-    }
-    ESP_LOGI(MESH_TAG, "Socket created, connecting to %s:%d", CONFIG_SOFTAP_SERVER_IP, CONFIG_SOFTAP_SERVER_PORT);
+    // A buffer to hold the message from the queue
+    message_to_send_t msg;
 
-    // Connect to the server
-    int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(struct sockaddr_in));
-    if (err != 0) {
-        ESP_LOGE(MESH_TAG, "Socket unable to connect: errno %d", errno);
-        close(sock);
-        return;
-    }
-    ESP_LOGI(MESH_TAG, "Successfully connected");
+    while (1) {
+        // If not connected, try to connect
+        if (sock < 0) {
+            ESP_LOGI("TCP_CLIENT", "Socket not connected. Attempting to connect...");
+            struct sockaddr_in dest_addr;
+            dest_addr.sin_addr.s_addr = inet_addr(server_ip);
+            dest_addr.sin_family = AF_INET;
+            dest_addr.sin_port = htons(server_port);
 
-    // Send the data
-    err = send(sock, data, len, 0);
-    if (err < 0) {
-        ESP_LOGE(MESH_TAG, "Error occurred during sending: errno %d", errno);
-    } else {
-        ESP_LOGI(MESH_TAG, "Message sent successfully");
+            sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+            if (sock < 0) {
+                ESP_LOGE("TCP_CLIENT", "Unable to create socket: errno %d", errno);
+                vTaskDelay(pdMS_TO_TICKS(5000)); // Wait before retrying
+                continue;
+            }
+
+            int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            if (err != 0) {
+                ESP_LOGE("TCP_CLIENT", "Socket unable to connect: errno %d", errno);
+                close(sock);
+                sock = -1;
+                vTaskDelay(pdMS_TO_TICKS(5000)); // Wait before retrying
+                continue;
+            }
+            ESP_LOGI("TCP_CLIENT", "Successfully connected to server");
+        }
+
+        // Wait for a message to appear in the queue
+        if (xQueueReceive(tcp_tx_queue, &msg, portMAX_DELAY) == pdPASS) {
+            ESP_LOGI("TCP_CLIENT", "Sending %d bytes.", msg.len);
+            
+            // Send the data over the existing socket
+            int bytes_sent = send(sock, msg.data, msg.len, 0);
+            if (bytes_sent < 0) {
+                ESP_LOGE("TCP_CLIENT", "Send failed: errno %d. Closing socket.", errno);
+                shutdown(sock, 0);
+                close(sock);
+                sock = -1; // Mark as disconnected to trigger reconnect
+            }
+        }
     }
-    
-    shutdown(sock, 0);
-    close(sock);
+    vTaskDelete(NULL);
 }
 
 void esp_mesh_p2p_rx_main(void *arg) {
@@ -102,7 +127,15 @@ void esp_mesh_p2p_rx_main(void *arg) {
         ESP_LOGI(MESH_TAG, "Received message of size %d from "MACSTR, data.size, MAC2STR(from.addr));
         ESP_LOGI(MESH_TAG, "Content: %.*s", data.size, data.data);
 
-        send_data_to_softap(data.data, data.size);
+        if (data.size > 0 && data.size <= sizeof(128)) {
+            message_to_send_t msg_to_queue;
+            memcpy(msg_to_queue.data, data.data, data.size);
+            msg_to_queue.len = data.size;
+
+            if (xQueueSend(tcp_tx_queue, &msg_to_queue, pdMS_TO_TICKS(100)) != pdPASS) {
+                ESP_LOGE(MESH_TAG, "Failed to send to TCP queue. Queue might be full.");
+            }
+        }
     }
     vTaskDelete(NULL);
 }
@@ -323,6 +356,10 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     ESP_LOGI(MESH_TAG, "<IP_EVENT_STA_GOT_IP>IP:" IPSTR, IP2STR(&event->ip_info.ip));
     // Only want to do this once IP has been established
+    if (esp_mesh_is_root()) {
+        ESP_LOGI(MESH_TAG, "Device is the root. Fixing root status now.");
+        ESP_ERROR_CHECK(esp_mesh_fix_root(true));
+    }
     xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL); 
 }
 
@@ -345,7 +382,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_mesh_init());
     ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL));
     /* force esp as root*/
-    ESP_ERROR_CHECK(esp_mesh_fix_root(true));
+    // ESP_ERROR_CHECK(esp_mesh_fix_root(true));
     /*  set mesh topology */
     ESP_ERROR_CHECK(esp_mesh_set_topology(CONFIG_MESH_TOPOLOGY));
     /*  set mesh max layer according to the topology */
@@ -393,5 +430,9 @@ void app_main(void)
              esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", esp_mesh_is_ps_enabled());
     
     // Registering Custom Event Handlers
-    xTaskCreate(root_toggle, "TOG", 3072, NULL, 2, NULL);
+    // xTaskCreate(root_toggle, "TOG", 3072, NULL, 2, NULL);
+    tcp_tx_queue = xQueueCreate(10, sizeof(message_to_send_t)); // Queue can hold 10 messages
+
+    // Start the persistent TCP client task
+    xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
 }
