@@ -30,10 +30,28 @@ menu "Example Configuration"
 
         config SOFTAP_TCP_SERVER_PORT
             int "TCP Server Port"
-            range 0 4500
+            range 0 65535
             default 3333
             help
                 Port that the TCP Server socket will monitor
+
+        config KEEPALIVE_IDLE
+            int "TCP keep-alive idle time(s)"
+            default 5
+            help
+                Keep-alive idle time. In idle time without receiving any data from peer, will send keep-alive probe packet
+
+        config KEEPALIVE_INTERVAL
+            int "TCP keep-alive interval time(s)"
+            default 5
+            help
+                Keep-alive probe packet interval time.
+
+        config KEEPALIVE_COUNT
+            int "TCP keep-alive packet retry send counts"
+            default 3
+            help
+                Keep-alive probe packet retry count.
 
     endmenu
 
@@ -87,45 +105,5 @@ menu "Example Configuration"
         endchoice
 
     endmenu
-
-    menu "TCP Configuration"
-
-        config EXAMPLE_PORT
-            int "Listening Port"
-            default 3333
-            help
-                TCP server port number to listen on.
-
-        config EXAMPLE_KEEPALIVE_IDLE
-            int "TCP Keepalive Idle Time"
-            default 5
-            help
-                Time (in seconds) the connection needs to remain idle before TCP starts sending keepalive probes.
-
-        config EXAMPLE_KEEPALIVE_INTERVAL
-            int "TCP Keepalive Interval"
-            default 5
-            help
-                Time interval (in seconds) between individual keepalive probes.
-
-        config EXAMPLE_KEEPALIVE_COUNT
-            int "TCP Keepalive Count"
-            default 3
-            help
-                Number of keepalive probes TCP sends before considering the connection dead.
-
-        config EXAMPLE_IPV4
-            bool "Enable IPv4"
-            default y
-            help
-                Enable IPv4 server.
-
-        config EXAMPLE_IPV6
-            bool "Enable IPv6"
-            default n
-            help
-                Enable IPv6 server.
-
-        endmenu
 
 endmenu

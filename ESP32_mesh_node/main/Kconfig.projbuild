@@ -157,7 +157,7 @@ menu "Example Configuration"
 
     config MESH_AP_PASSWD
         string "Mesh AP Password"
-        default "MAP_PASSWD"
+        default "mypassword"
         help
             Mesh AP password.
 

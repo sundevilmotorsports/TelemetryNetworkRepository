@@ -17,14 +17,18 @@
 /*******************************************************
  *                Constants
  *******************************************************/
-#define RX_SIZE          (1500)
-#define TX_SIZE          (1460)
+#define RX_SIZE         (1500)
+#define TX_SIZE         (1460)
+
+#define PORT            3333
+#define HOST_IP_ADDR    "192.168.4.3"
 
 /*******************************************************
  *                Variable Definitions
  *******************************************************/
 static const char *MESH_TAG = "MAIN.C";
 static const char *ROOT_TAG = "ROOT_TOGGLE";
+static const char *TCP_TAG = "TCP CLIENT";
 
 static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
 static uint8_t tx_buf[TX_SIZE] = { 0, };
@@ -34,6 +38,8 @@ static bool is_mesh_connected = false;
 static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
+
+static const char *payload = "cringlee";    
 
 typedef struct {
     uint8_t data[128];
@@ -56,54 +62,56 @@ void root_toggle(void *pvParameters);
  *                Function Definitions
  *******************************************************/
 
- static void tcp_client_task(void *pvParameters) {
-    const char *server_ip = CONFIG_SOFTAP_SERVER_IP;
-    const int server_port = CONFIG_SOFTAP_SERVER_PORT;
-    int sock = -1;
-
-    // A buffer to hold the message from the queue
-    message_to_send_t msg;
+void tcp_client_task(void *pvParameters)
+{
+    const char *payload = "{\"sensor\":\"gps\",\"time\":1351824120,\"data\":[48.75608,2.302038]}";
+    char host_ip[] = HOST_IP_ADDR;
+    int addr_family = AF_INET;
+    int ip_protocol = IPPROTO_IP;
+    
+    ESP_LOGI(TCP_TAG, "TCP client task started.");
 
     while (1) {
-        // If not connected, try to connect
+        struct sockaddr_in dest_addr;
+        dest_addr.sin_addr.s_addr = inet_addr(host_ip);
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(PORT);
+
+        int sock = socket(addr_family, SOCK_STREAM, ip_protocol);
         if (sock < 0) {
-            ESP_LOGI("TCP_CLIENT", "Socket not connected. Attempting to connect...");
-            struct sockaddr_in dest_addr;
-            dest_addr.sin_addr.s_addr = inet_addr(server_ip);
-            dest_addr.sin_family = AF_INET;
-            dest_addr.sin_port = htons(server_port);
+            ESP_LOGE(TCP_TAG, "Unable to create socket: errno %d", errno);
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait before retrying
+            continue;
+        }
+        ESP_LOGI(TCP_TAG, "Socket created, connecting to %s:%d", host_ip, PORT);
 
-            sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-            if (sock < 0) {
-                ESP_LOGE("TCP_CLIENT", "Unable to create socket: errno %d", errno);
-                vTaskDelay(pdMS_TO_TICKS(5000)); // Wait before retrying
-                continue;
-            }
+        int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        if (err != 0) {
+            ESP_LOGE(TCP_TAG, "Socket unable to connect: errno %d. Closing socket.", errno);
+            close(sock);
+            vTaskDelay(pdMS_TO_TICKS(4000)); // Wait longer before retrying connection
+            continue;
+        }
+        ESP_LOGI(TCP_TAG, "Successfully connected");
 
-            int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-            if (err != 0) {
-                ESP_LOGE("TCP_CLIENT", "Socket unable to connect: errno %d", errno);
-                close(sock);
-                sock = -1;
-                vTaskDelay(pdMS_TO_TICKS(5000)); // Wait before retrying
-                continue;
+        // This inner loop handles sending and receiving data on the established connection
+        while (1) {
+            int err = send(sock, payload, strlen(payload), 0);
+            if (err < 0) {
+                ESP_LOGE(TCP_TAG, "Error occurred during sending: errno %d. Breaking from inner loop.", errno);
+                break; // Exit inner loop to close socket and reconnect
             }
-            ESP_LOGI("TCP_CLIENT", "Successfully connected to server");
+            ESP_LOGI(TCP_TAG, "Payload sent successfully.");
+
+            // Delay for a while before sending the next message
+            vTaskDelay(pdMS_TO_TICKS(2000));
         }
 
-        // Wait for a message to appear in the queue
-        if (xQueueReceive(tcp_tx_queue, &msg, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI("TCP_CLIENT", "Sending %d bytes.", msg.len);
-            
-            // Send the data over the existing socket
-            int bytes_sent = send(sock, msg.data, msg.len, 0);
-            if (bytes_sent < 0) {
-                ESP_LOGE("TCP_CLIENT", "Send failed: errno %d. Closing socket.", errno);
-                shutdown(sock, 0);
-                close(sock);
-                sock = -1; // Mark as disconnected to trigger reconnect
-            }
-        }
+        // If we break from the inner loop, it means the connection is lost.
+        ESP_LOGE(TCP_TAG, "Shutting down socket and restarting...");
+        shutdown(sock, 0);
+        close(sock);
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Wait a bit before trying to reconnect
     }
     vTaskDelete(NULL);
 }
@@ -361,6 +369,7 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
         ESP_ERROR_CHECK(esp_mesh_fix_root(true));
     }
     xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL); 
+    xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
 }
 
 void app_main(void)
@@ -434,5 +443,5 @@ void app_main(void)
     tcp_tx_queue = xQueueCreate(10, sizeof(message_to_send_t)); // Queue can hold 10 messages
 
     // Start the persistent TCP client task
-    xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
+    // xTaskCreate(tcp_client, "tcp_client", 4096, NULL, 5, NULL);
 }
