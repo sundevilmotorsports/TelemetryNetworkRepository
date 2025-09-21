@@ -34,8 +34,8 @@
 
 #define UDP_PORT 3333
 
-#define MAX_MESSAGE_LEN 128
-#define QUEUE_SIZE 10
+#define MAX_MESSAGE_LEN 64
+#define QUEUE_SIZE 32
 
 static const char *TAG = "wifi softAP";
 
@@ -158,6 +158,7 @@ static esp_err_t sse_handler(httpd_req_t *req) {
 		if (xQueueReceive(sse_queue, &msg, portMAX_DELAY) == pdTRUE) {
 			char buffer[MAX_MESSAGE_LEN + 16]; // 16 for sse overhead (data:...\n\n\0) and just extra
 			snprintf(buffer, sizeof(buffer), "data: %s\n\n", msg);
+			ESP_LOGI(TAG, "sse send: %s", buffer);
 			if (httpd_resp_send_chunk(req, buffer, strlen(buffer)) != ESP_OK) {
 				ESP_LOGW("SSE_HANDLER", "Client disconnected");
 				break;
@@ -222,6 +223,8 @@ httpd_handle_t start_webserver(){
 
 static void udp_server_task(void *pvParameters)
 {
+
+
     char rx_buffer[MAX_MESSAGE_LEN];
     char addr_str[128];
     struct sockaddr_in dest_addr;
@@ -236,6 +239,11 @@ static void udp_server_task(void *pvParameters)
         return;
     }
     ESP_LOGI(TAG, "UDP socket created");
+
+	// increase kernel buffer for bursts (e.g., 16KB)
+	int rcvbuf = 16 * 1024;
+	setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+	ESP_LOGI(TAG, "UDP socket created, SO_RCVBUF set to %d", rcvbuf);
 
     int err = bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (err < 0) { // error
@@ -256,8 +264,9 @@ static void udp_server_task(void *pvParameters)
             break;
         } else {
             rx_buffer[len] = 0;
-            inet_ntoa_r(source_addr.sin_addr, addr_str, sizeof(addr_str) - 1);
-            ESP_LOGI(TAG, "UDP recv from %s:%d: %s", addr_str, ntohs(source_addr.sin_port), rx_buffer);
+            //inet_ntoa_r(source_addr.sin_addr, addr_str, sizeof(addr_str) - 1);
+            //ESP_LOGI(TAG, "UDP recv from %s:%d: %s", addr_str, ntohs(source_addr.sin_port), rx_buffer);
+			ESP_LOGI(TAG, "udp recv...");
 
             // push message to sse queue without blockage
 			// NOTE: truncates message to MAX_MESSAGE_LEN length, so will show that -1 length of chars to client
