@@ -8,3 +8,5 @@ ESP32_softap/build/
 ESP32_mesh_root_node/.vscode/
 ESP32_mesh_node/.vscode/
 ESP32_softap/.vscode/
+espnow/.vscode/
+espnow/build/
