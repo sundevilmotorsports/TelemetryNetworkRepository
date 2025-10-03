@@ -21,14 +21,14 @@
 #define TX_SIZE         (1460)
 
 #define PORT            3333
-#define HOST_IP_ADDR    "192.168.4.3"
+#define HOST_IP_ADDR    "192.168.10.1"
 
 /*******************************************************
  *                Variable Definitions
  *******************************************************/
 static const char *MESH_TAG = "MAIN.C";
 static const char *ROOT_TAG = "ROOT_TOGGLE";
-static const char *TCP_TAG = "TCP CLIENT";
+static const char *TCP_TAG = "TCP Server";
 
 static const uint8_t MESH_ID[6] = { 0x77, 0x77, 0x77, 0x77, 0x77, 0x77};
 static uint8_t tx_buf[TX_SIZE] = { 0, };
@@ -38,6 +38,12 @@ static bool is_mesh_connected = false;
 static mesh_addr_t mesh_parent_addr;
 static int mesh_layer = -1;
 static esp_netif_t *netif_sta = NULL;
+static esp_netif_t *netif_ap = NULL;
+
+#define PORT                        3333
+#define KEEPALIVE_IDLE              5
+#define KEEPALIVE_INTERVAL          5
+#define KEEPALIVE_COUNT             3
 
 static const char *payload = "cringlee";    
 
@@ -116,6 +122,109 @@ void tcp_client_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+
+static void handle_connection(const int sock)
+{
+    int len;
+    char rx_buffer[128];
+
+    do {
+        len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+        if (len < 0) {
+            ESP_LOGE(TCP_TAG, "Error occurred during receiving: errno %d", errno);
+        } else if (len == 0) {
+            ESP_LOGW(TCP_TAG, "Connection closed by client");
+        } else {
+            rx_buffer[len] = 0; // Null-terminate whatever is received
+            ESP_LOGI(TCP_TAG, "Received %d bytes: %s", len, rx_buffer);
+        }
+    } while (len > 0);
+}
+
+static void tcp_server_task(void *pvParameters)
+{
+    char addr_str[128];
+    int addr_family = (int)pvParameters;
+    int ip_protocol = 0;
+    int keepAlive = 1;
+    int keepIdle = KEEPALIVE_IDLE;
+    int keepInterval = KEEPALIVE_INTERVAL;
+    int keepCount = KEEPALIVE_COUNT;
+    struct sockaddr_storage dest_addr;
+
+
+    if (addr_family == AF_INET) {
+        struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
+        dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
+        dest_addr_ip4->sin_family = AF_INET;
+        dest_addr_ip4->sin_port = htons(PORT);
+        ip_protocol = IPPROTO_IP;
+    }
+
+    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+    if (listen_sock < 0) {
+        ESP_LOGE(TCP_TAG, "Unable to create socket: errno %d", errno);
+        vTaskDelete(NULL);
+        return;
+    }
+    int opt = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    ESP_LOGI(TCP_TAG, "Socket created");
+
+    int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err != 0) {
+        ESP_LOGE(TCP_TAG, "Socket unable to bind: errno %d", errno);
+        ESP_LOGE(TCP_TAG, "IPPROTO: %d", addr_family);
+        goto CLEAN_UP;
+    }
+    ESP_LOGI(TCP_TAG, "Socket bound, port %d", PORT);
+
+    err = listen(listen_sock, 1);
+    if (err != 0) {
+        ESP_LOGE(TCP_TAG, "Error occurred during listen: errno %d", errno);
+        goto CLEAN_UP;
+    }
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP_LOGI(TCP_TAG, "Socket listening");
+
+        struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
+        socklen_t addr_len = sizeof(source_addr);
+        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+        ESP_LOGI(TCP_TAG, "Socket just accepted");
+        if (sock < 0) {
+            ESP_LOGE(TCP_TAG, "Unable to accept connection: errno %d", errno);
+            break;
+        }
+
+        // Set tcp keepalive option
+        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
+        // Convert ip address to string
+        if (source_addr.ss_family == PF_INET) {
+            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
+        }
+
+        ESP_LOGI(TCP_TAG, "Socket accepted ip address: %s", addr_str);
+
+        // This sends back to client
+        // do_retransmit(sock); 
+        handle_connection(sock);
+
+        shutdown(sock, 0);
+        close(sock);
+        ESP_LOGI(TCP_TAG, "Connection handled and closed.");
+    }
+
+CLEAN_UP:
+    close(listen_sock);
+    vTaskDelete(NULL);
+}
+
 void esp_mesh_p2p_rx_main(void *arg) {
     esp_err_t err;
     mesh_addr_t from;
@@ -166,6 +275,8 @@ void mesh_event_handler(void *arg, esp_event_base_t event_base,
 {
     mesh_addr_t id = {0,};
     static uint16_t last_layer = 0;
+    // ADDED: Flag to ensure we only initialize the network once
+    static bool is_root_net_init = false;
 
     switch (event_id) {
     case MESH_EVENT_STARTED: {
@@ -363,48 +474,46 @@ void ip_event_handler(void *arg, esp_event_base_t event_base,
 {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     ESP_LOGI(MESH_TAG, "<IP_EVENT_STA_GOT_IP>IP:" IPSTR, IP2STR(&event->ip_info.ip));
-    // Only want to do this once IP has been established
-    if (esp_mesh_is_root()) {
-        ESP_LOGI(MESH_TAG, "Device is the root. Fixing root status now.");
-        ESP_ERROR_CHECK(esp_mesh_fix_root(true));
-    }
-    xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL); 
-    xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
+    xTaskCreate(tcp_client_task, "tcp_client", 4096, (void *)AF_INET, 5, NULL);
+    // Only non-root nodes should start tasks here. The root starts them
+    // in the mesh_event_handler.
+    // if (esp_mesh_is_root()) {
+    //     ESP_LOGI(MESH_TAG, "Non-root node got IP, starting tasks.");
+    //     xTaskCreate(esp_mesh_p2p_rx_main, "MPRX", 3072, NULL, 5, NULL); 
+    //     xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
+    //     ESP_LOGI("cringle", "cringle");
+    // }
 }
 
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
-    /*  tcpip initialization */
+    /* tcpip initialization */
     ESP_ERROR_CHECK(esp_netif_init());
-    /*  event initialization */
+    /* event initialization */
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    /*  create network interfaces for mesh (only station instance saved for further manipulation, soft AP instance ignored */
-    ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, NULL));
-    /*  wifi initialization */
+    /* create network interfaces for mesh (station and soft AP) */
+    // MODIFIED: Capture the netif_ap handle
+    ESP_ERROR_CHECK(esp_netif_create_default_wifi_mesh_netifs(&netif_sta, &netif_ap));
+    /* wifi initialization */
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&config));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
     ESP_ERROR_CHECK(esp_wifi_start());
-    /*  mesh initialization */
+    /* mesh initialization */
     ESP_ERROR_CHECK(esp_mesh_init());
     ESP_ERROR_CHECK(esp_event_handler_register(MESH_EVENT, ESP_EVENT_ANY_ID, &mesh_event_handler, NULL));
-    /* force esp as root*/
-    // ESP_ERROR_CHECK(esp_mesh_fix_root(true));
-    /*  set mesh topology */
+    /* set mesh topology */
     ESP_ERROR_CHECK(esp_mesh_set_topology(CONFIG_MESH_TOPOLOGY));
-    /*  set mesh max layer according to the topology */
+    /* set mesh max layer according to the topology */
     ESP_ERROR_CHECK(esp_mesh_set_max_layer(CONFIG_MESH_MAX_LAYER));
     ESP_ERROR_CHECK(esp_mesh_set_vote_percentage(1));
     ESP_ERROR_CHECK(esp_mesh_set_xon_qsize(128));
 #ifdef CONFIG_MESH_ENABLE_PS
     /* Enable mesh PS function */
     ESP_ERROR_CHECK(esp_mesh_enable_ps());
-    /* better to increase the associate expired time, if a small duty cycle is set. */
     ESP_ERROR_CHECK(esp_mesh_set_ap_assoc_expire(60));
-    /* better to increase the announce interval to avoid too much management traffic, if a small duty cycle is set. */
-    ESP_ERROR_CHECK(esp_mesh_set_announce_interval(600, 3300));
 #else
     /* Disable mesh PS function */
     ESP_ERROR_CHECK(esp_mesh_disable_ps());
@@ -413,35 +522,32 @@ void app_main(void)
     mesh_cfg_t cfg = MESH_INIT_CONFIG_DEFAULT();
     /* mesh ID */
     memcpy((uint8_t *) &cfg.mesh_id, MESH_ID, 6);
-    /* router */
+    
+    /* channel (must be configured for self-hosted network) */
     cfg.channel = CONFIG_MESH_CHANNEL;
     cfg.router.ssid_len = strlen(CONFIG_MESH_ROUTER_SSID);
     memcpy((uint8_t *) &cfg.router.ssid, CONFIG_MESH_ROUTER_SSID, cfg.router.ssid_len);
     memcpy((uint8_t *) &cfg.router.password, CONFIG_MESH_ROUTER_PASSWD,
            strlen(CONFIG_MESH_ROUTER_PASSWD));
+    
     /* mesh softAP */
     ESP_ERROR_CHECK(esp_mesh_set_ap_authmode(CONFIG_MESH_AP_AUTHMODE));
     cfg.mesh_ap.max_connection = CONFIG_MESH_AP_CONNECTIONS;
-    cfg.mesh_ap.nonmesh_max_connection = CONFIG_MESH_NON_MESH_AP_CONNECTIONS;
+    cfg.mesh_ap.nonmesh_max_connection = 4;
     memcpy((uint8_t *) &cfg.mesh_ap.password, CONFIG_MESH_AP_PASSWD,
            strlen(CONFIG_MESH_AP_PASSWD));
-    ESP_ERROR_CHECK(esp_mesh_set_config(&cfg));
+    ESP_ERROR_CHECK(esp_mesh_set_config(&cfg)); // This line will now succeed.
     /* mesh start */
     ESP_ERROR_CHECK(esp_mesh_start());
-#ifdef CONFIG_MESH_ENABLE_PS
-    /* set the device active duty cycle. (default:10, MESH_PS_DEVICE_DUTY_REQUEST) */
-    ESP_ERROR_CHECK(esp_mesh_set_active_duty_cycle(CONFIG_MESH_PS_DEV_DUTY, CONFIG_MESH_PS_DEV_DUTY_TYPE));
-    /* set the network active duty cycle. (default:10, -1, MESH_PS_NETWORK_DUTY_APPLIED_ENTIRE) */
-    ESP_ERROR_CHECK(esp_mesh_set_network_duty_cycle(CONFIG_MESH_PS_NWK_DUTY, CONFIG_MESH_PS_NWK_DUTY_DURATION, CONFIG_MESH_PS_NWK_DUTY_RULE));
-#endif
+    
+    // ADDED: Force this device to be the root of the self-contained network
+    // ESP_ERROR_CHECK(esp_mesh_fix_root(true)); 
+
     ESP_LOGI(MESH_TAG, "mesh starts successfully, heap:%" PRId32 ", %s<%d>%s, ps:%d",  esp_get_minimum_free_heap_size(),
              esp_mesh_is_root_fixed() ? "root fixed" : "root not fixed",
              esp_mesh_get_topology(), esp_mesh_get_topology() ? "(chain)":"(tree)", esp_mesh_is_ps_enabled());
     
-    // Registering Custom Event Handlers
-    // xTaskCreate(root_toggle, "TOG", 3072, NULL, 2, NULL);
-    tcp_tx_queue = xQueueCreate(10, sizeof(message_to_send_t)); // Queue can hold 10 messages
-
-    // Start the persistent TCP client task
-    // xTaskCreate(tcp_client, "tcp_client", 4096, NULL, 5, NULL);
+    // tcp_tx_queue = xQueueCreate(10, sizeof(message_to_send_t));
+    // xTaskCreate(tcp_client_task, "tcp_client", 4096, (void *)AF_INET, 5, NULL);
+    ESP_LOGI("cringle", "cringle");
 }
